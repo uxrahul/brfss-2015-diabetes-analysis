@@ -1,0 +1,470 @@
+---
+title: "Final_Project"
+author: "Team 4"
+date: "2024-10-09"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+##Here is where we load necessary libraries
+
+library(dplyr) #For data manipulation
+library(MASS) #For Stepwise regression
+library(glmnet) #For Lasso regression
+library(pROC) #For ROC analysis
+library(car)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r Load Data}
+
+##Read in the diabetes dataset from the specified file path 
+diabetes_data <- read.csv("/Users/rahulsingh/Downloads/DSC 423/Group Project/data set/diabetes_binary_health_indicators_BRFSS2015.csv")
+
+##Explore the dataset
+
+##Display the feature names and first six rows of the dataset as a quick review to familiarize ourselves with the data
+head(diabetes_data)               
+
+##Retrieve the dimensions of our data set (number of rows and columns)
+dim(diabetes_data)
+
+##Review the structure of the data, including data types for each variable
+str(diabetes_data)
+
+##Create a summary of all variables in the dataset to see key statistics
+summary(diabetes_data)
+
+##Checking all columns in the data set to see if any have NA values. This data set is complete and has no null or NA values.
+colSums(is.na(diabetes_data))
+
+##Creating box plots of each independent variable to look at th spread of data for each variable. A significant number of outliers are observed for the variable BMI. We also see outliers for the MentHlth and PhysHlth variables. Finally, the box plots for Education and Income tell a story that the people in this study were largely more well educated with higher incomes. 
+
+##Create a vector of colors using the rainbow function
+colors <- rainbow(length(names(diabetes_data)))
+
+##Generate the boxplots
+for (i in seq_along(names(diabetes_data))) {
+  var <- names(diabetes_data)[i]
+  boxplot(diabetes_data[[var]], main = paste("Boxplot of", var), col=colors[i])
+}
+
+##Look at histograms of variables with outliers. 
+##Histogram of BMI
+hist(diabetes_data$BMI)
+
+###This histogram of the BMI data shows that it is right-skewed, with the majority of the data concentrated to the left of the model and the outliers trailing to the right.
+
+##Histogram of Mental Health
+hist(diabetes_data$MentHlth)
+
+###This histogram is right-skewed.
+
+##Histogram of Physical Health
+hist(diabetes_data$PhysHlth)
+
+###This histogram looks almost exactly like the one for Mental Health, also right skewed.
+
+##Histogram of General Health
+hist(diabetes_data$GenHlth)
+
+###This histogram is right-skewed 
+
+##Histogram of Age
+hist(diabetes_data$Age)
+
+###This histogram is left-skewed
+
+##Histogram of Education Status
+hist(diabetes_data$Education)
+
+###This histogram is left skewed
+```
+
+```{r Grouping Variables, echo=TRUE}
+## Age Grouping
+diabetes_data <- diabetes_data %>%
+    mutate(Age_group = case_when(
+        Age <= 5 ~ "Young",
+        Age > 5 & Age <= 9 ~ "Middle-Aged",
+        Age > 9 ~ "Older",
+        TRUE ~ NA_character_
+    ),
+    Education_level = case_when(
+        Education %in% c("1", "2") ~ "Low Education",
+        Education %in% c("3", "4") ~ "Medium Education",
+        Education %in% c("5", "6") ~ "High Education",
+        TRUE ~ NA_character_
+    ),
+    Income_level = case_when(
+        Income <= 2 ~ "Low Income",
+        Income > 2 & Income <= 4 ~ "Medium Income",
+        Income > 4 ~ "High Income",
+        TRUE ~ NA_character_
+    ),
+    GenHealthCategory = case_when(
+        GenHlth %in% c(1, 2) ~ "Good Health",
+        GenHlth == 3 ~ "Average Health",
+        GenHlth %in% c(4, 5) ~ "Poor Health",
+        TRUE ~ NA_character_
+    ),
+    MentHlthCategory = case_when(
+        MentHlth <= 5 ~ "Low",
+        MentHlth > 5 & MentHlth <= 16 ~ "Moderate",
+        MentHlth > 9 ~ "High",
+        TRUE ~ NA_character_
+    ),
+    PhysHlthCategory = case_when(
+        PhysHlth <= 5 ~ "Low",
+        PhysHlth > 5 & PhysHlth <= 16 ~ "Moderate",
+        PhysHlth > 9 ~ "High",
+        TRUE ~ NA_character_
+    ))
+
+## Remove the original columns
+diabetes_data <- diabetes_data %>%
+    dplyr::select(-Age, -Education, -Income, -GenHlth, -MentHlth, -PhysHlth)
+
+
+
+```
+
+
+```{r Load Data and Perform Initial EDA}
+##Using this code to convert the columns that are actually of data type factor from numerical columns to factors. One of the reasons I believe the owner of this data set binned many of the variables to improve the signal-to-noise ratio. There are many data points in this model (253680), and small fluctuations in values usually end up being noise in the data. 
+diabetes_df <- diabetes_data %>%
+  mutate_at(vars(Diabetes_binary, HighBP, HighChol, CholCheck,Smoker, Stroke, HeartDiseaseorAttack, PhysActivity, Fruits, Veggies, HvyAlcoholConsump, AnyHealthcare, NoDocbcCost, DiffWalk, Sex, Age_group, Education_level, Income_level, GenHealthCategory, MentHlthCategory, PhysHlthCategory), as.factor)
+
+##Check to make sure the columns that needed to be converted to type factor were.
+str(diabetes_df)
+
+```
+
+```{r outlier-removal, echo=TRUE}
+##Define the function to remove outliers based on the IQR method
+remove_outliers <- function(data, column) {
+    Q1 <- quantile(data[[column]], 0.25, na.rm = TRUE)
+    Q3 <- quantile(data[[column]], 0.75, na.rm = TRUE)
+    IQR_value <- Q3 - Q1
+##Filter data to remove outliers in the specific column
+    data <- data %>% filter(
+        data[[column]] >= (Q1 - 1.5 * IQR_value) &
+        data[[column]] <= (Q3 + 1.5 * IQR_value)
+    )
+    return(data)
+}
+
+##Apply the outlier removal function to selected columns only
+for (col in c("BMI")) {
+    diabetes_df <- remove_outliers(diabetes_df, col)
+}
+```
+
+```{r Split data into Train and Test}
+
+##We set the seed for reproducibility
+set.seed(123)
+
+##Extracting 80% of the data to split into train and test data
+sample_data <- sample(1:nrow(diabetes_df), .8 * nrow(diabetes_df))
+
+##Split the data into training and testing data sets
+train_df <- diabetes_df[sample_data, ]
+test_df <- diabetes_df[-sample_data, ]
+
+
+##Inspect training data frame
+str(train_df)  
+
+##Inspect testing data frame
+str(test_df)
+```
+
+```{r Logistic Regression Model (Full Model)}
+##Fit full logistic model
+log_model <- glm(Diabetes_binary ~ ., data = train_df, family= binomial)
+
+##Display model summary
+summary(log_model)
+```
+
+
+```{r Multicollinearity Check}
+##Calculate Variance Inflation Factors (VIF)
+vif_values <- vif(log_model)
+
+##Print VIF values to assess multicollinearity
+print(vif_values)
+
+###VIF values are low and indicate any multicollinearity in this model is minimal and likely would have little to no impact on model performance.
+```
+
+
+```{r Stepwise Backward Regression for Feature Selection}
+##Stepwise Backward Regression for Feature Selection
+log_model_full <- glm(Diabetes_binary ~ ., data = train_df, family= binomial)
+
+##Backward stepwise selection
+step_model <- stepAIC(log_model_full, direction = "both")
+
+##Display summary of selected model
+summary(step_model)
+```
+
+
+```{r Function to predict on test set for selected models}
+library(pROC)
+
+##Model Evaluation Function
+predict_and_evaluate <- function(model, test_data, lambda = best_lambda) {
+    ##Adjust if using glmnet model
+    if ("glmnet" %in% class(model)) {
+        x_test <- model.matrix(Diabetes_binary ~ ., data = test_data)[,-1]
+        prob.preds <- predict(model, newx = x_test, s = lambda, type = "response")
+    } else {
+        prob.preds <- predict(model, test_data, type = "response")
+    }
+
+    ##Convert probabilities to binary predictions
+    resp.preds <- ifelse(prob.preds >= 0.5, 1, 0)
+    confusion <- table(test_data$Diabetes_binary, resp.preds)
+    
+    ##Calculate Sensitivity and Accuracy
+    sensitivity <- confusion[2, 2] / (confusion[2, 1] + confusion[2, 2])
+    accuracy <- sum(diag(confusion)) / sum(confusion)
+    
+    ##Calculate AUC
+    roc_obj <- roc(test_data$Diabetes_binary, as.numeric(prob.preds))
+    auc <- auc(roc_obj)
+    
+    list(ConfusionMatrix = confusion, Sensitivity = sensitivity, Accuracy = accuracy, AUC = auc)
+}
+```
+
+```{r Evaluate Log Model}
+predict_and_evaluate(log_model, test_df, lambda = best_lambda)
+```
+
+
+```{r Stepwise Model Evaluation}
+
+##Evaluate on test data
+step_model_eval <- predict_and_evaluate(step_model, test_df)
+
+##Print evaluation results
+print(step_model_eval)
+
+##Residual and ROC Curve Plotting
+##Deviance residuals for stepwise model
+residuals_stepwise <- residuals(step_model, type = "deviance")
+
+
+plot(residuals_stepwise, main = "Deviance Residuals of Stepwise-Selected Model", 
+     ylab = "Deviance Residuals", xlab = "Index", pch = 20)
+abline(h = 0, col = "red")
+
+##ROC Curve
+roc_obj <- roc(test_df$Diabetes_binary, predict(step_model, test_df, type="response"))
+plot(roc_obj, col = "blue", main = "ROC Curve for Stepwise Model")
+
+##Display AUC value
+auc(roc_obj)
+```
+
+
+
+```{r First Order Model}
+# Fit the full model with all variables
+first_order_model_full <- glm(Diabetes_binary ~ Age_group + BMI + MentHlthCategory + PhysHlthCategory +
+                              HighBP + HighChol + CholCheck + Smoker + Stroke + HeartDiseaseorAttack +
+                              PhysActivity + Fruits + Veggies + HvyAlcoholConsump + AnyHealthcare +
+                              NoDocbcCost + GenHealthCategory + DiffWalk + Sex, 
+                              data = train_df, family = "binomial")
+
+# Perform stepwise selection based on p-values (both forward and backward)
+first_order_model_step <- step(first_order_model_full, direction = "both", trace = 0)
+
+# Print the variables included in the final model
+cat("Variables used in the First-Order Model after stepwise selection:\n")
+print(names(coef(first_order_model_step)))
+
+# Summary of the stepwise model
+summary(first_order_model_step)
+
+# Predict on the test set with the selected significant variables
+preds_first_order_step <- predict(first_order_model_step, newdata = test_df, type = "response")
+
+# Convert probabilities to binary predictions (threshold 0.5)
+resp_first_order_step <- ifelse(preds_first_order_step >= 0.5, 1, 0)
+
+# Confusion matrix for model evaluation
+confusion_first_order_step <- table(test_df$Diabetes_binary, resp_first_order_step)
+print(confusion_first_order_step)
+
+# Sensitivity (True Positive Rate)
+sensitivity_first_order_step <- confusion_first_order_step[2, 2] / (confusion_first_order_step[2, 1] + confusion_first_order_step[2, 2])
+
+# Overall accuracy of the model
+accuracy_first_order_step <- sum(diag(confusion_first_order_step)) / sum(confusion_first_order_step)
+
+# ROC (Area Under the Curve)
+roc_obj_first_order_step <- roc(test_df$Diabetes_binary, as.numeric(preds_first_order_step))
+auc_first_order_step <- auc(roc_obj_first_order_step)
+
+# Display confusion matrix, sensitivity, accuracy, and AUC
+cat("Confusion Matrix:\n")
+print(confusion_first_order_step)
+cat("Sensitivity:", sensitivity_first_order_step, "\n")
+cat("Accuracy:", accuracy_first_order_step, "\n")
+cat("AUC:", auc_first_order_step, "\n")
+
+# Deviance residuals plot
+deviance_residuals_first_order_step <- sign(as.numeric(test_df$Diabetes_binary) - preds_first_order_step) * 
+                                       sqrt(-2 * (as.numeric(test_df$Diabetes_binary) * log(preds_first_order_step) + 
+                                                  (1 - as.numeric(test_df$Diabetes_binary)) * log(1 - preds_first_order_step)))
+plot(deviance_residuals_first_order_step, main = "Deviance Residuals of First-Order Stepwise Model", 
+     ylab = "Deviance Residuals", xlab = "Index", pch = 20)
+abline(h = 0, col = "red")
+
+# ROC curve
+plot(roc_obj_first_order_step, col = "blue", main = "ROC Curve for First-Order Stepwise Model")
+cat("AUC for First-Order Stepwise Model:", auc_first_order_step, "\n")
+
+```
+
+
+
+
+```{r Second-Order Logistic Regression Model with Interaction Terms and Squared Terms}
+
+# Fit the full second-order model
+second_order_model_full <- glm(Diabetes_binary ~ (Age_group + BMI + MentHlthCategory + PhysHlthCategory)^2 + Education_level +
+                               Income_level + HighBP + HighChol + CholCheck + Smoker + Stroke + HeartDiseaseorAttack +
+                               PhysActivity + Fruits + Veggies + HvyAlcoholConsump + AnyHealthcare +
+                               NoDocbcCost + GenHealthCategory + DiffWalk + Sex, 
+                               data = train_df, family = "binomial")
+
+# Perform stepwise selection based on p-values
+second_order_model_step <- step(second_order_model_full, direction = "both", trace = 0)
+
+# Print the variables included in the final model
+cat("Variables used in the Second-Order Model after stepwise selection:\n")
+print(names(coef(second_order_model_step)))
+
+# Summary of the stepwise model
+summary(second_order_model_step)
+
+# Predict on the test set with the selected significant variables
+preds_second_order_step <- predict(second_order_model_step, newdata = test_df, type = "response")
+
+# Convert probabilities to binary predictions (threshold 0.5)
+resp_second_order_step <- ifelse(preds_second_order_step >= 0.5, 1, 0)
+
+# Confusion matrix for model evaluation
+confusion_second_order_step <- table(test_df$Diabetes_binary, resp_second_order_step)
+print(confusion_second_order_step)
+
+# Sensitivity (True Positive Rate)
+sensitivity_second_order_step <- confusion_second_order_step[2, 2] / (confusion_second_order_step[2, 1] + confusion_second_order_step[2, 2])
+
+# Overall accuracy of the model
+accuracy_second_order_step <- sum(diag(confusion_second_order_step)) / sum(confusion_second_order_step)
+
+# ROC (Area Under the Curve)
+roc_obj_second_order_step <- roc(test_df$Diabetes_binary, as.numeric(preds_second_order_step))
+auc_second_order_step <- auc(roc_obj_second_order_step)
+
+# Display confusion matrix, sensitivity, accuracy, and AUC
+cat("Confusion Matrix:\n")
+print(confusion_second_order_step)
+cat("Sensitivity:", sensitivity_second_order_step, "\n")
+cat("Accuracy:", accuracy_second_order_step, "\n")
+cat("AUC:", auc_second_order_step, "\n")
+
+# Deviance residuals plot
+deviance_residuals_second_order_step <- sign(as.numeric(test_df$Diabetes_binary) - preds_second_order_step) * 
+                                        sqrt(-2 * (as.numeric(test_df$Diabetes_binary) * log(preds_second_order_step) + 
+                                                   (1 - as.numeric(test_df$Diabetes_binary)) * log(1 - preds_second_order_step)))
+plot(deviance_residuals_second_order_step, main = "Deviance Residuals of Second-Order Stepwise Model", 
+     ylab = "Deviance Residuals", xlab = "Index", pch = 20)
+abline(h = 0, col = "red")
+
+# ROC curve
+plot(roc_obj_second_order_step, col = "blue", main = "ROC Curve for Second-Order Stepwise Model")
+cat("AUC for Second-Order Stepwise Model:", auc_second_order_step, "\n")
+```
+
+
+```{r Interaction Model}
+# Fit the full interaction model
+interaction_model_full <- glm(Diabetes_binary ~ (Age_group + BMI + MentHlthCategory + PhysHlthCategory + Education_level +
+                                                 HighBP + HighChol + CholCheck + Smoker + Stroke + HeartDiseaseorAttack +
+                                                 PhysActivity + Fruits + Veggies + HvyAlcoholConsump + AnyHealthcare +
+                                                 NoDocbcCost + GenHealthCategory + DiffWalk + Sex)^2, 
+                              data = train_df, family = "binomial")
+
+# Perform stepwise selection based on p-values
+interaction_model_step <- step(interaction_model_full, direction = "forward", trace = 0)
+
+# Print the variables included in the final model
+cat("Variables used in the Interaction Model after stepwise selection:\n")
+print(names(coef(interaction_model_step)))
+
+# Summary of the interaction model
+summary(interaction_model_step)
+
+# Predict on the test set with the selected significant variables
+preds_interaction_step <- predict(interaction_model_step, newdata = test_df, type = "response")
+
+# Convert probabilities to binary predictions (threshold 0.5)
+resp_interaction_step <- ifelse(preds_interaction_step >= 0.5, 1, 0)
+
+# Confusion matrix for model evaluation
+confusion_interaction_step <- table(test_df$Diabetes_binary, resp_interaction_step)
+print(confusion_interaction_step)
+
+# Sensitivity (True Positive Rate)
+sensitivity_interaction_step <- confusion_interaction_step[2, 2] / (confusion_interaction_step[2, 1] + confusion_interaction_step[2, 2])
+
+# Overall accuracy of the model
+accuracy_interaction_step <- sum(diag(confusion_interaction_step)) / sum(confusion_interaction_step)
+
+# ROC (Area Under the Curve)
+roc_obj_interaction_step <- roc(test_df$Diabetes_binary, as.numeric(preds_interaction_step))
+auc_interaction_step <- auc(roc_obj_interaction_step)
+
+# Display confusion matrix, sensitivity, accuracy, and AUC
+cat("Confusion Matrix:\n")
+print(confusion_interaction_step)
+cat("Sensitivity:", sensitivity_interaction_step, "\n")
+cat("Accuracy:", accuracy_interaction_step, "\n")
+cat("AUC:", auc_interaction_step, "\n")
+
+# Deviance residuals plot
+deviance_residuals_interaction_step <- sign(as.numeric(test_df$Diabetes_binary) - preds_interaction_step) * 
+                                       sqrt(-2 * (as.numeric(test_df$Diabetes_binary) * log(preds_interaction_step) + 
+                                                  (1 - as.numeric(test_df$Diabetes_binary)) * log(1 - preds_interaction_step)))
+plot(deviance_residuals_interaction_step, main = "Deviance Residuals of Interaction Stepwise Model", 
+     ylab = "Deviance Residuals", xlab = "Index", pch = 20)
+abline(h = 0, col = "red")
+
+# ROC curve
+plot(roc_obj_interaction_step, col = "blue", main = "ROC Curve for Interaction Stepwise Model")
+cat("AUC for Interaction Stepwise Model:", auc_interaction_step, "\n")
+```
+
+
+
+
